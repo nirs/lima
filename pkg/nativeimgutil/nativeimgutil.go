@@ -12,6 +12,7 @@ import (
 	"github.com/containerd/continuity/fs"
 	"github.com/docker/go-units"
 	"github.com/lima-vm/go-qcow2reader"
+	"github.com/lima-vm/go-qcow2reader/image"
 	"github.com/lima-vm/go-qcow2reader/image/qcow2"
 	"github.com/lima-vm/go-qcow2reader/image/raw"
 	"github.com/lima-vm/lima/pkg/osutil"
@@ -28,13 +29,20 @@ func ConvertToRaw(source, dest string, size *int64, allowSourceWithBackingFile b
 		return err
 	}
 	defer srcF.Close()
+
 	srcImg, err := qcow2reader.Open(srcF)
 	if err != nil {
 		return fmt.Errorf("failed to detect the format of %q: %w", source, err)
 	}
+	defer srcImg.Close()
+
 	if size != nil && *size < srcImg.Size() {
 		return fmt.Errorf("specified size %d is smaller than the original image size (%d) of %q", *size, srcImg.Size(), source)
 	}
+	if err = srcImg.Readable(); err != nil {
+		return fmt.Errorf("image %q is not readable: %w", source, err)
+	}
+
 	logrus.Infof("Converting %q (%s) to a raw disk %q", source, srcImg.Type(), dest)
 	switch t := srcImg.Type(); t {
 	case raw.Type:
@@ -52,13 +60,14 @@ func ConvertToRaw(source, dest string, size *int64, allowSourceWithBackingFile b
 				return fmt.Errorf("qcow2 image %q has an unexpected backing file: %q", source, q.BackingFile)
 			}
 		}
+		return convertImageToRaw(srcImg, dest, size)
 	default:
 		logrus.Warnf("image %q has an unexpected format: %q", source, t)
+		return convertImageToRaw(srcImg, dest, size)
 	}
-	if err = srcImg.Readable(); err != nil {
-		return fmt.Errorf("image %q is not readable: %w", source, err)
-	}
+}
 
+func convertImageToRaw(srcImg image.Image, dest string, size *int64) error {
 	// Create a tmp file because source and dest can be same.
 	destTmpF, err := os.CreateTemp(filepath.Dir(dest), filepath.Base(dest)+".lima-*.tmp")
 	if err != nil {
@@ -68,7 +77,13 @@ func ConvertToRaw(source, dest string, size *int64, allowSourceWithBackingFile b
 	defer os.RemoveAll(destTmp)
 	defer destTmpF.Close()
 
-	// Copy
+	// Truncating before the copy allows copying the data without seeking, and
+	// give the file system a hint that may make the copy more efficient.
+	if err := destTmpF.Truncate(srcImg.Size()); err != nil {
+		return err
+	}
+
+	// Copy non-zero blocks from the source image.
 	srcImgR := io.NewSectionReader(srcImg, 0, srcImg.Size())
 	bar, err := progressbar.New(srcImg.Size())
 	if err != nil {
@@ -81,22 +96,17 @@ func ConvertToRaw(source, dest string, size *int64, allowSourceWithBackingFile b
 	if err != nil {
 		return fmt.Errorf("failed to call copySparse(), bufSize=%d, copied=%d: %w", bufSize, copied, err)
 	}
-
-	// Resize
-	if size != nil {
-		logrus.Infof("Expanding to %s", units.BytesSize(float64(*size)))
-		if err = MakeSparse(destTmpF, *size); err != nil {
-			return err
-		}
-	}
 	if err = destTmpF.Close(); err != nil {
 		return err
 	}
 
-	// Rename destTmp into dest
-	if err = os.RemoveAll(dest); err != nil {
-		return err
+	// Resize image if needed.
+	if size != nil {
+		if err := expand(destTmp, *size); err != nil {
+			return err
+		}
 	}
+
 	return os.Rename(destTmp, dest)
 }
 
@@ -108,24 +118,30 @@ func convertRawToRaw(source, dest string, size *int64) error {
 		}
 	}
 	if size != nil {
-		logrus.Infof("Expanding to %s", units.BytesSize(float64(*size)))
-		destF, err := os.OpenFile(dest, os.O_RDWR, 0o644)
-		if err != nil {
+		if err := expand(dest, *size); err != nil {
 			return err
 		}
-		if err = MakeSparse(destF, *size); err != nil {
-			_ = destF.Close()
-			return err
-		}
-		return destF.Close()
 	}
 	return nil
 }
 
+func expand(image string, size int64) error {
+	logrus.Infof("Expanding to %s", units.BytesSize(float64(size)))
+	f, err := os.OpenFile(image, os.O_RDWR, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err = f.Truncate(size); err != nil {
+		return err
+	}
+	return f.Close()
+}
+
 func copySparse(w *os.File, r io.Reader, bufSize int64) (int64, error) {
 	var (
-		n              int64
-		eof, hasWrites bool
+		n   int64
+		eof bool
 	)
 
 	zeroBuf := make([]byte, bufSize)
@@ -139,20 +155,15 @@ func copySparse(w *os.File, r io.Reader, bufSize int64) (int64, error) {
 			}
 		}
 		// TODO: qcow2reader should have a method to notify whether buf is zero
-		if bytes.Equal(buf, zeroBuf) {
-			if _, sErr := w.Seek(int64(rN), io.SeekCurrent); sErr != nil {
-				return n, fmt.Errorf("failed seek: %w", sErr)
-			}
-			// no need to ftruncate here
+		if bytes.Equal(buf[:rN], zeroBuf[:rN]) {
 			n += int64(rN)
 		} else {
-			hasWrites = true
-			wN, wErr := w.Write(buf)
+			wN, wErr := w.WriteAt(buf[:rN], n)
 			if wN > 0 {
 				n += int64(wN)
 			}
 			if wErr != nil {
-				return n, fmt.Errorf("failed to read: %w", wErr)
+				return n, fmt.Errorf("failed to write: %w", wErr)
 			}
 			if wN != rN {
 				return n, fmt.Errorf("read %d, but wrote %d bytes", rN, wN)
@@ -160,10 +171,6 @@ func copySparse(w *os.File, r io.Reader, bufSize int64) (int64, error) {
 		}
 	}
 
-	// Ftruncate must be run if the file contains only zeros
-	if !hasWrites {
-		return n, MakeSparse(w, n)
-	}
 	return n, nil
 }
 
