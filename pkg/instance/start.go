@@ -321,7 +321,7 @@ func watchHostAgentEvents(ctx context.Context, inst *store.Instance, haStdoutPat
 	}
 
 	if !receivedRunningEvent {
-		return errors.New("did not receive an event with the \"running\" status")
+		return errors.New("did not receive an event with the \"running\" status, consider increasing start --timeout")
 	}
 
 	return nil
