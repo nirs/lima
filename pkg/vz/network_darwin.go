@@ -40,6 +40,8 @@ func DialQemu(unixSock string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	setUnixConnBuffers(unixConn)
 	qemuConn := &QEMUPacketConn{unixConn: unixConn}
 
 	server, client, err := createSockPair()
@@ -59,6 +61,20 @@ func DialQemu(unixSock string) (*os.File, error) {
 	go remote.HandleConn(qemuConn)
 
 	return client, nil
+}
+
+func setUnixConnBuffers(conn net.Conn) {
+	// Match socket_vmnet buffers. Errors are not fatal as this is an
+	// optimization.
+	const size = 1024 * 1024
+	if c, ok := conn.(*net.UnixConn); ok {
+		if err := c.SetWriteBuffer(size); err != nil {
+			logrus.Warnf("Failed to set socket write buffer: %v", err)
+		}
+		if err := c.SetReadBuffer(size); err != nil {
+			logrus.Warnf("Failed to set socket write buffer: %v", err)
+		}
+	}
 }
 
 // QEMUPacketConn converts raw network packet to a QEMU supported network packet.
