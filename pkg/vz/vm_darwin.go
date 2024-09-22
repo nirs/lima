@@ -737,17 +737,10 @@ func createSockPair() (server, client *os.File, _ error) {
 	}
 	serverFD := pairs[0]
 	clientFD := pairs[1]
-
-	if err = syscall.SetsockoptInt(serverFD, syscall.SOL_SOCKET, syscall.SO_SNDBUF, 1*1024*1024); err != nil {
+	if err := setSocketFDBuffers(serverFD); err != nil {
 		return nil, nil, err
 	}
-	if err = syscall.SetsockoptInt(serverFD, syscall.SOL_SOCKET, syscall.SO_RCVBUF, 4*1024*1024); err != nil {
-		return nil, nil, err
-	}
-	if err = syscall.SetsockoptInt(clientFD, syscall.SOL_SOCKET, syscall.SO_SNDBUF, 1*1024*1024); err != nil {
-		return nil, nil, err
-	}
-	if err = syscall.SetsockoptInt(clientFD, syscall.SOL_SOCKET, syscall.SO_RCVBUF, 4*1024*1024); err != nil {
+	if err := setSocketFDBuffers(clientFD); err != nil {
 		return nil, nil, err
 	}
 	server = os.NewFile(uintptr(serverFD), "server")
@@ -760,4 +753,17 @@ func createSockPair() (server, client *os.File, _ error) {
 	})
 	vmNetworkFiles = append(vmNetworkFiles, server, client)
 	return server, client, nil
+}
+
+func setSocketFDBuffers(fd int) error {
+	// For optimal performance, the recommended value of SO_RCVBUF is four times
+	// the value of SO_SNDBUF.
+	// https://developer.apple.com/documentation/virtualization/vzfilehandlenetworkdeviceattachment/3969266-maximumtransmissionunit?language=objc
+	if err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_SNDBUF, 1*1024*1024); err != nil {
+		return err
+	}
+	if err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, 4*1024*1024); err != nil {
+		return err
+	}
+	return nil
 }
