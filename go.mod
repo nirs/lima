@@ -143,3 +143,5 @@ replace inet.af/tcpproxy => github.com/inetaf/tcpproxy v0.0.0-20240214030015-3ce
 // Nested virtualization support is yet to be merged into VZ https://github.com/Code-Hex/vz/pull/159.
 // We use our (temporary) fork to add the feature.
 replace github.com/Code-Hex/vz/v3 => github.com/lima-vm/vz/v3 v3.0.0-20241008080607-2a22b5e278ee
+
+replace github.com/lima-vm/go-qcow2reader => ../go-qcow2reader
